@@ -73,8 +73,6 @@ async def create_knowledgebase(
 
     # Get all of the file keys of the successful uploads
     remote_file_keys = [success.resource.remote_file_key for success in upload_summary.successes]
-
-    # Create the payload obj
     to_llama_docs_payload = ToLlamaDocsEventPayload(remote_file_keys=remote_file_keys)
 
     # BackgroundTasks creates a separate thread --> Callable interface

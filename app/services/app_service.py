@@ -17,7 +17,7 @@ from app import exceptions
 
 # Import Services
 from app.services.file_service import RemoteFileService
-from app.services.knowledge_service import KnowledgeBaseService
+from app.services.knowledge_service import KnowledgeBaseService, UploadSummary
 
 
 # Utility Functions
@@ -85,7 +85,7 @@ class AppService:
         except exceptions.ResourceException as e:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unexpected error: {str(e)}")
 
-    async def create_knowledgebase(self, name: str, visibility: Visibility = Visibility.PRIVATE, user_id: Optional[str] = None, files: Optional[List[UploadFile]] = File(...)) -> None:
+    async def create_knowledgebase(self, name: str, visibility: Visibility = Visibility.PRIVATE, user_id: Optional[str] = None, files: Optional[List[UploadFile]] = File(...)) -> UploadSummary:
         """
         Create a knowledgebase from file uploads.
         """
@@ -115,7 +115,7 @@ class AppService:
         except exceptions.KBException as e:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"File handling error: {str(e)}")
 
-    async def add_resources(self, kb_id: str, files: List[UploadFile], user_id: Optional[str]) -> None:
+    async def add_resources(self, kb_id: str, files: List[UploadFile], user_id: Optional[str]) -> UploadSummary:
         """
         Add one or more resources to a specific knowledge base.
         Handles file uploads and resource creation.
