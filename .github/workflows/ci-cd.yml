@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+      - "**" # To include all branches
+  pull_request:
+    branches:
+      - "**"
+
+env:
+  DOCKER_HUB_NAMESPACE: chrisworkmait
+
+jobs:
+  check-dockerfile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check Dockerfile content
+        id: check_dockerfile
+        run: |
+          if [ -f Dockerfile ]; then
+            dockerfile_lines=$(grep -v '^#' Dockerfile | grep -v '^\s*$' | wc -l)
+            from_lines=$(grep -i '^FROM' Dockerfile | grep -v '^#' | grep -v '^\s*$' | wc -l)
+            if [ "$dockerfile_lines" -gt "$from_lines" ]; then
+              echo "has_code_beyond_from=true" >> $GITHUB_ENV
+            else
+              echo "has_code_beyond_from=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "Dockerfile does not exist"
+            echo "has_code_beyond_from=false" >> $GITHUB_ENV
+          fi
+
+    outputs:
+      has_code_beyond_from: ${{ steps.check_dockerfile.outputs.has_code_beyond_from }}
+
+  checkout:
+    runs-on: ubuntu-latest
+    needs: check-dockerfile
+    if: ${{ needs.check-dockerfile.outputs.has_code_beyond_from == 'true' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine service name
+        id: set-service-name
+        run: |
+          SERVICE_NAME=$(basename $GITHUB_REPOSITORY)
+          if [ -z "$SERVICE_NAME" ]; then
+            SERVICE_NAME="service-$(uuidgen)"
+          fi
+          echo "service_name=$SERVICE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Read Python version from Dockerfile
+        id: set-python-version
+        run: |
+          PYTHON_VERSION=$(grep -oP '(?<=FROM python:)\d+\.\d+' Dockerfile || echo "3.9")
+          if [ -z "$PYTHON_VERSION" ]; then
+            PYTHON_VERSION="3.9"
+          fi
+          echo "python_version=$PYTHON_VERSION" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      service_name: ${{ steps.set-service-name.outputs.service_name }}
+      python_version: ${{ steps.set-python-version.outputs.python_version }}
+
+  setup-env-run-tests:
+    runs-on: ubuntu-latest
+    needs: [checkout, check-dockerfile]
+    if: ${{ needs.check-dockerfile.outputs.has_code_beyond_from == 'true' }}
+
+    outputs:
+      coverage-failed: ${{ env.COVERAGE_FAILED }}
+
+    env:
+      COVERAGE_FAILED: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ needs.checkout.outputs.python_version }}
+
+      - name: Print Python version
+        run: python --version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        id: run-tests
+        run: |
+          # Run the tests and collect coverage information
+          pytest --cov=. --cov-report=term-missing > coverage.txt 2>&1 || echo "COVERAGE_FAILED=true" >> $GITHUB_ENV
+        continue-on-error: true
+
+      - name: Print coverage failed flag
+        run: echo "COVERAGE FAIL? ${{ env.COVERAGE_FAILED }}"
+
+      - name: Upload Test Logs
+        id: upload-test-logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: tests.txt
+
+  notify:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    needs: [setup-env-run-tests, check-dockerfile]
+    if: ${{ needs.check-dockerfile.outputs.has_code_beyond_from == 'true' }}
+
+    steps:
+      - name: Set Logs Path
+        id: set-logs-path
+        run: echo "logs_path=tests.txt" >> $GITHUB_ENV
+
+      - name: Notify GitHub user
+        uses: actions/github-script@v6
+        if: ${{ needs.setup-env-run-tests.outputs.coverage-failed == 'true' }}
+        with:
+          script: |
+            const branch = '${{ github.ref }}';
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Coverage Job Failed on ${branch}`,
+              body: `The coverage job has failed or was cancelled on branch ${branch}. Please review the logs for more details.`
+            });
+
+      - name: Fail if on main or staging branch and coverage failed
+        if: ${{ needs.setup-env-run-tests.outputs.coverage-failed == 'true' && github.ref == 'refs/heads/main' }}
+        run: exit 1
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [setup-env-run-tests, checkout, check-dockerfile]
+    if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') && needs.check-dockerfile.outputs.has_code_beyond_from == 'true' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: ${{ env.DOCKER_HUB_NAMESPACE }}/${{ needs.checkout.outputs.service_name }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Notify Central Repository
+        run: echo "hey"
